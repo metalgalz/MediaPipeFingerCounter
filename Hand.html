@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="ms">
+<head>
+    <meta charset="UTF-8">
+    <!-- Viewport meta tag sangat penting untuk desain responsif -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pendeteksi Jari MediaPipe</title>
+    <!-- Memuat Tailwind CSS untuk styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Memuat Google Fonts (Inter) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        /* Mengatur font default ke Inter */
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Menyembunyikan elemen video asli karena kita akan menggambarnya di canvas */
+        video {
+            display: none;
+        }
+
+        /* [RESPONSIVE KEY] Container ini memastikan area video dan canvas
+           menjaga rasio aspek 16:9, membuatnya terlihat bagus di semua ukuran layar. */
+        .stack-container {
+            position: relative;
+            width: 100%; /* Mengisi lebar parent-nya */
+            max-width: 640px; /* Lebar maksimum untuk tampilan desktop */
+            aspect-ratio: 16 / 9; /* Rasio aspek umum untuk video */
+        }
+
+            /* Semua elemen di dalam stack-container akan mengisi seluruh ruangnya */
+            .stack-container > * {
+                position: absolute;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                border-radius: 0.75rem; /* rounded-xl */
+            }
+    </style>
+</head>
+<!-- [RESPONSIVE KEY] Menggunakan Flexbox untuk menengahkan semua konten secara vertikal dan horizontal.
+     Padding (p-4) memberikan ruang di sekitar tepi layar. -->
+<body class="bg-gray-900 text-white flex flex-col items-center justify-center min-h-screen p-4">
+
+    <!-- [RESPONSIVE KEY] 'w-full' membuat kontainer ini mengambil lebar penuh pada layar kecil.
+         'max-w-2xl' membatasi lebarnya pada layar yang lebih besar agar tidak terlalu melebar. -->
+    <div class="w-full max-w-2xl mx-auto">
+        <!-- [RESPONSIVE KEY] 'md:text-4xl' adalah contoh class responsif Tailwind.
+             Font akan berukuran 3xl secara default, dan menjadi 4xl pada layar medium (md) ke atas. -->
+        <h1 class="text-3xl md:text-4xl font-bold text-center mb-2 text-emerald-400">Pendeteksi Jari Real-Time</h1>
+        <p id="instruction-text" class="text-center text-gray-400 mb-6">Tunjukkan tangan Anda ke kamera untuk menghitung jari yang terangkat.</p>
+
+        <!-- Container utama untuk video dan canvas -->
+        <div id="liveView" class="stack-container bg-gray-800 shadow-2xl rounded-xl mx-auto">
+            <video id="webcam" autoplay playsinline></video>
+            <canvas id="output_canvas"></canvas>
+        </div>
+
+        <!-- Tampilan untuk hasil hitungan jari -->
+        <div class="text-center mt-6">
+            <p id="fingerCountLabel" class="text-lg text-gray-400 mb-1">Jumlah Jari Terangkat</p>
+            <p id="fingerCount" class="text-7xl font-bold text-emerald-400">0</p>
+        </div>
+
+        <!-- Tombol telah dihapus -->
+
+    </div>
+
+    <!-- Memuat library MediaPipe Vision -->
+    <script type="module">
+        import {
+            HandLandmarker,
+            FilesetResolver,
+            DrawingUtils
+        } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
+
+        // Mendapatkan referensi ke elemen DOM
+        const video = document.getElementById("webcam");
+        const canvasElement = document.getElementById("output_canvas");
+        const canvasCtx = canvasElement.getContext("2d");
+        const fingerCountElement = document.getElementById("fingerCount");
+        const instructionText = document.getElementById("instruction-text");
+        const fingerCountLabel = document.getElementById("fingerCountLabel");
+
+        let handLandmarker;
+        let runningMode = "VIDEO";
+        let webcamRunning = false;
+        let lastVideoTime = -1;
+
+        // Fungsi untuk menginisialisasi HandLandmarker
+        const createHandLandmarker = async () => {
+            instructionText.innerText = "Memuat model deteksi...";
+            const filesetResolver = await FilesetResolver.forVisionTasks(
+                "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+            );
+            handLandmarker = await HandLandmarker.createFromOptions(filesetResolver, {
+                baseOptions: {
+                    modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
+                    delegate: "GPU"
+                },
+                runningMode: runningMode,
+                numHands: 2,
+                minHandDetectionConfidence: 0.5,
+                minHandPresenceConfidence: 0.5,
+                minTrackingConfidence: 0.5,
+            });
+            console.log("Hand Landmarker siap digunakan.");
+            // **PERUBAHAN: Langsung aktifkan webcam setelah model siap**
+            enableCam();
+        };
+        createHandLandmarker();
+
+        // **PERUBAHAN: Fungsi disederhanakan untuk langsung menyalakan webcam**
+        const enableCam = () => {
+            if (!handLandmarker) {
+                console.log("Tunggu! HandLandmarker belum dimuat.");
+                return;
+            }
+
+            if (webcamRunning) { // Keamanan agar tidak berjalan dua kali
+                return;
+            }
+
+            webcamRunning = true;
+            instructionText.innerText = "Mohon berikan izin untuk mengakses kamera...";
+
+            // Mengakses webcam
+            navigator.mediaDevices.getUserMedia({ video: true }).then((stream) => {
+                video.srcObject = stream;
+                instructionText.innerText = "Tunjukkan tangan Anda ke kamera untuk menghitung jari yang terangkat.";
+                video.addEventListener("loadeddata", predictWebcam);
+            }).catch((err) => {
+                console.error("error accessing webcam", err);
+                webcamRunning = false;
+                instructionText.innerText = "Gagal mengakses webcam. Pastikan Anda memberikan izin.";
+                fingerCountLabel.innerText = "ERROR";
+                fingerCountElement.innerText = ":(";
+            });
+        };
+
+        // Fungsi untuk melakukan prediksi secara real-time
+        const predictWebcam = async () => {
+            const videoWidth = video.videoWidth;
+            const videoHeight = video.videoHeight;
+
+            if (canvasElement.width !== videoWidth) {
+                canvasElement.width = videoWidth;
+                canvasElement.height = videoHeight;
+            }
+
+            let startTimeMs = performance.now();
+            if (lastVideoTime !== video.currentTime) {
+                lastVideoTime = video.currentTime;
+                const results = handLandmarker.detectForVideo(video, startTimeMs);
+                drawResults(results);
+            }
+
+            if (webcamRunning === true) {
+                window.requestAnimationFrame(predictWebcam);
+            }
+        };
+
+        // Fungsi untuk menggambar hasil dan menghitung jari
+        const drawResults = (results) => {
+            const drawingUtils = new DrawingUtils(canvasCtx);
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+            // Menggambar video yang dibalik (efek cermin) ke canvas
+            canvasCtx.scale(-1, 1);
+            canvasCtx.translate(-canvasElement.width, 0);
+            canvasCtx.drawImage(video, 0, 0, canvasElement.width, canvasElement.height);
+
+            let totalFingersUp = 0;
+            if (results.landmarks && results.landmarks.length > 0) {
+                for (let i = 0; i < results.landmarks.length; i++) {
+                    const landmarks = results.landmarks[i];
+
+                    drawingUtils.drawConnectors(landmarks, HandLandmarker.HAND_CONNECTIONS, { color: "#FFFFFF", lineWidth: 5 });
+                    drawingUtils.drawLandmarks(landmarks, { color: "#059669", fillColor: "#6EE7B7", lineWidth: 2, radius: 6 });
+
+                    totalFingersUp += countRaisedFingers(landmarks);
+                }
+            }
+
+            fingerCountElement.innerText = totalFingersUp;
+
+            // Kirim data jumlah jari ke host C# jika berjalan di dalam WebView2
+            if (window.chrome && window.chrome.webview) {
+                window.chrome.webview.postMessage(totalFingersUp);
+            }
+
+            canvasCtx.restore();
+        };
+
+        // Fungsi untuk menghitung jari yang terangkat
+        const countRaisedFingers = (landmarks) => {
+            let fingersUp = 0;
+
+            const tipIds = [4, 8, 12, 16, 20];
+            const pipIds = [6, 10, 14, 18];
+            const mcpIds = [5, 9, 13, 17];
+
+            for (let i = 0; i < 4; i++) {
+                if (landmarks[tipIds[i + 1]].y < landmarks[pipIds[i]].y &&
+                    landmarks[pipIds[i]].y < landmarks[mcpIds[i]].y) {
+                    fingersUp++;
+                }
+            }
+
+            const thumbTip = landmarks[tipIds[0]];
+            const indexFingerDip = landmarks[7];
+            const indexFingerMcp = landmarks[mcpIds[0]];
+            const middleFingerMcp = landmarks[mcpIds[1]];
+
+            const refDistance = Math.hypot(
+                indexFingerMcp.x - middleFingerMcp.x,
+                indexFingerMcp.y - middleFingerMcp.y
+            );
+
+            const thumbOutwardDistance = Math.hypot(
+                thumbTip.x - indexFingerMcp.x,
+                thumbTip.y - indexFingerMcp.y
+            );
+
+            const thumbToIndexDipDistance = Math.hypot(
+                thumbTip.x - indexFingerDip.x,
+                thumbTip.y - indexFingerDip.y
+            );
+
+            const tolerance = refDistance * 0.20;
+            const isThumbPointingUp = thumbTip.y < (middleFingerMcp.y + tolerance);
+
+            if (thumbOutwardDistance > refDistance * 1.0 &&
+                thumbToIndexDipDistance > refDistance * 0.8 &&
+                isThumbPointingUp) {
+                fingersUp++;
+            }
+
+            return fingersUp;
+        };
+    </script>
+</body>
+</html>
